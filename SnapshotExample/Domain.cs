@@ -59,8 +59,10 @@ namespace SnapshotExample
         {
             // In this demo, these snapshots are going to get pretty large, which will slow things down slightly
             // In reality you probably never want to book things in the past, so we would be able to purge some of
-            // the _bookings state.
-            return new Snapshot(_id, Version, _bookings);
+            // the _bookings state. To simulate this, we will save only a random 365 days worth.
+            var purgedBookings = _bookings.Take(365).ToDictionary(b => b.Key, b => b.Value);
+            
+            return new Snapshot(_id, Version, purgedBookings);
         }
 
         public class Snapshot
