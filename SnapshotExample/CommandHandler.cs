@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Text;
+using System.Threading.Tasks;
 using EventStore.ClientAPI;
 using Newtonsoft.Json;
 
@@ -59,9 +60,17 @@ namespace SnapshotExample
         
         private void WriteSnapshot(Guid resourceId, Resource.Snapshot snapshot)
         {
+            string streamName = $"resourceSnapshots-{resourceId}";
             var json = JsonConvert.SerializeObject(snapshot);
             var esEvent = new EventData(Guid.NewGuid(), "ResourceSnapshot", true, Encoding.UTF8.GetBytes(json), null);
-            _connection.AppendToStreamAsync($"resourceSnapshots-{resourceId}", ExpectedVersion.Any, esEvent);
+            var result = _connection.AppendToStreamAsync(streamName, ExpectedVersion.Any, esEvent).Result;
+
+            // This is the first ever snapshot, do a one off metadata update for the stream
+            // We never need to keep anything but the latest snapshot, so set maxCount to 1
+            // Event Store will eventually delete the data during a scavenge
+            if (result.NextExpectedVersion == 0)
+                _connection.SetStreamMetadataAsync(streamName, ExpectedVersion.Any,
+                    StreamMetadata.Create(maxCount: 1));
         }
         
         private void WriteEvents(Guid resourceId, long expectedVersion, IEnumerable<Event> events)
@@ -79,18 +88,17 @@ namespace SnapshotExample
         public Resource HydrateResource(Guid resourceId, Resource.Snapshot snapshot)
         {
             var aggregate = new Resource();
+            var streamName = $"resource-{resourceId}";
+            var eventsAssembly = typeof(Event).Assembly.GetName().Name;
             
             if(snapshot != null)
                 aggregate.ApplySnapshot(snapshot);
             
             // Now read any events written since the last snapshot.
             // If we failed to load a snapshot, just start from the beginning of the stream
-            var nextEventNumber = snapshot?.Version + 1 ?? StreamPosition.Start;
-            
-            var sliceTask = _connection.ReadStreamEventsForwardAsync($"resource-{resourceId}", nextEventNumber,
-                ReadPageSize, false);
+            var nextEventNumber = snapshot?.Version + 1 ?? StreamPosition.Start;             
             StreamEventsSlice slice = null;
-            var eventsAssembly = typeof(Event).Assembly.GetName().Name;
+            var sliceTask = _connection.ReadStreamEventsForwardAsync(streamName, nextEventNumber, ReadPageSize, false);
             
             do
             {
@@ -98,16 +106,16 @@ namespace SnapshotExample
                 nextEventNumber = slice.NextEventNumber;
                 
                 //start reading the next slice while we process this one
-                sliceTask = _connection.ReadStreamEventsForwardAsync($"resource-{resourceId}", nextEventNumber,
-                    ReadPageSize, false);
+                sliceTask = _connection.ReadStreamEventsForwardAsync(streamName, nextEventNumber, ReadPageSize, false);
                 
                 var deserialized = slice.Events.Select(e =>
                 {
                     var eventData = Encoding.UTF8.GetString(e.Event.Data);
-                    return JsonConvert.DeserializeObject(eventData, Type.GetType($"{eventsAssembly}.{e.Event.EventType}"));
+                    return JsonConvert.DeserializeObject(eventData,Type.GetType($"{eventsAssembly}.{e.Event.EventType}"));
                 });
                 
-                // Apply each event to the aggregate, this will cause it to update its internal state
+                // Apply each event to the aggregate, this will cause it to update its internal model
+                // in preparation to process a command
                 foreach(var e in deserialized)
                     aggregate.ApplyEvent((Event)e);
                 
